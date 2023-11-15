@@ -102,17 +102,90 @@ TQ_OBJECT_CONSTRUCTORS_IMPL(UncompiledDataWithoutPreparseDataWithJob)
 TQ_OBJECT_CONSTRUCTORS_IMPL(UncompiledDataWithPreparseDataAndJob)
 
 TQ_OBJECT_CONSTRUCTORS_IMPL(InterpreterData)
+TRUSTED_POINTER_ACCESSORS(InterpreterData, bytecode_array, BytecodeArray,
+                          kBytecodeArrayOffset,
+                          kBytecodeArrayIndirectPointerTag)
+
 TQ_OBJECT_CONSTRUCTORS_IMPL(SharedFunctionInfo)
 DEFINE_DEOPT_ELEMENT_ACCESSORS(SharedFunctionInfo, Tagged<Object>)
 
-RELEASE_ACQUIRE_ACCESSORS(SharedFunctionInfo, function_data, Tagged<Object>,
-                          kFunctionDataOffset)
 RELEASE_ACQUIRE_ACCESSORS(SharedFunctionInfo, name_or_scope_info,
                           Tagged<Object>, kNameOrScopeInfoOffset)
 RELEASE_ACQUIRE_ACCESSORS(SharedFunctionInfo, script, Tagged<HeapObject>,
                           kScriptOffset)
 RELEASE_ACQUIRE_ACCESSORS(SharedFunctionInfo, raw_script, Tagged<Object>,
                           kScriptOffset)
+
+void SharedFunctionInfo::SetData(Tagged<Object> value, ReleaseStoreTag tag,
+                                 DataType type, WriteBarrierMode mode) {
+#ifdef V8_ENABLE_SANDBOX
+  if (type == DataType::kTrusted) {
+    DCHECK(IsExposedTrustedObject(value));
+    // Only one of trusted_function_data and function_data can be in use.
+    clear_function_data(kRelaxedStore);
+    set_trusted_function_data(value, tag, mode);
+  } else {
+    DCHECK_EQ(type, DataType::kRegular);
+    // Only one of trusted_function_data and function_data can be in use.
+    clear_trusted_function_data(kRelaxedStore);
+    set_function_data(value, tag, mode);
+  }
+#else
+  set_function_data(value, tag, mode);
+#endif  // V8_ENABLE_SANDBOX
+}
+
+#ifdef V8_ENABLE_SANDBOX
+void SharedFunctionInfo::clear_function_data(RelaxedStoreTag) {
+  TaggedField<Object, kFunctionDataOffset>::Relaxed_Store(*this,
+                                                          Smi::FromInt(-1));
+}
+
+void SharedFunctionInfo::clear_trusted_function_data(RelaxedStoreTag) {
+  TaggedField<Object, kTrustedFunctionDataOffset>::Relaxed_Store(*this,
+                                                                 Smi::zero());
+}
+
+bool SharedFunctionInfo::has_trusted_function_data() const {
+  return TaggedField<Object, kTrustedFunctionDataOffset>::Relaxed_Load(*this) !=
+         Smi::zero();
+}
+
+DEF_ACQUIRE_GETTER(SharedFunctionInfo, trusted_function_data, Tagged<Object>) {
+  return TaggedField<Object, kTrustedFunctionDataOffset>::Acquire_Load(
+      cage_base, *this);
+}
+
+void SharedFunctionInfo::set_trusted_function_data(Tagged<Object> value,
+                                                   ReleaseStoreTag,
+                                                   WriteBarrierMode mode) {
+  TaggedField<Object, kTrustedFunctionDataOffset>::Release_Store(*this, value);
+  CONDITIONAL_WRITE_BARRIER(*this, kTrustedFunctionDataOffset, value, mode);
+}
+#endif  // V8_ENABLE_SANDBOX
+
+DEF_ACQUIRE_GETTER(SharedFunctionInfo, function_data, Tagged<Object>) {
+  Tagged<Object> value =
+      TaggedField<Object, kFunctionDataOffset>::Acquire_Load(cage_base, *this);
+  return value;
+}
+
+void SharedFunctionInfo::set_function_data(Tagged<Object> value,
+                                           ReleaseStoreTag,
+                                           WriteBarrierMode mode) {
+  TaggedField<Object, kFunctionDataOffset>::Release_Store(*this, value);
+  CONDITIONAL_WRITE_BARRIER(*this, kFunctionDataOffset, value, mode);
+}
+
+Tagged<Object> SharedFunctionInfo::GetData() const {
+#ifdef V8_ENABLE_SANDBOX
+  Tagged<Object> trusted_data = trusted_function_data(kAcquireLoad);
+  if (trusted_data != Smi::zero()) {
+    return trusted_data;
+  }
+#endif
+  return function_data(kAcquireLoad);
+}
 
 DEF_GETTER(SharedFunctionInfo, script, Tagged<HeapObject>) {
   return script(cage_base, kAcquireLoad);
@@ -597,7 +670,7 @@ DEF_GETTER(SharedFunctionInfo, api_func_data, Tagged<FunctionTemplateInfo>) {
 }
 
 DEF_GETTER(SharedFunctionInfo, HasBytecodeArray, bool) {
-  Tagged<Object> data = function_data(cage_base, kAcquireLoad);
+  Tagged<Object> data = GetData();
   if (!IsHeapObject(data)) return false;
   InstanceType instance_type =
       HeapObject::cast(data)->map(cage_base)->instance_type();
@@ -614,26 +687,28 @@ Tagged<BytecodeArray> SharedFunctionInfo::GetBytecodeArray(
 
   DCHECK(HasBytecodeArray());
 
-  base::Optional<DebugInfo> debug_info =
-      TryGetDebugInfo(isolate->GetMainThreadIsolateUnsafe());
-  if (debug_info.has_value() && debug_info->HasInstrumentedBytecodeArray()) {
-    return debug_info->OriginalBytecodeArray();
+  Isolate* main_isolate = isolate->GetMainThreadIsolateUnsafe();
+  base::Optional<Tagged<DebugInfo>> debug_info = TryGetDebugInfo(main_isolate);
+  if (debug_info.has_value() &&
+      debug_info.value()->HasInstrumentedBytecodeArray()) {
+    return debug_info.value()->OriginalBytecodeArray(main_isolate);
   }
 
-  return GetActiveBytecodeArray();
+  return GetActiveBytecodeArray(main_isolate);
 }
 
-DEF_GETTER(SharedFunctionInfo, GetActiveBytecodeArray, Tagged<BytecodeArray>) {
-  Tagged<Object> data = function_data(kAcquireLoad);
+Tagged<BytecodeArray> SharedFunctionInfo::GetActiveBytecodeArray(
+    const Isolate* isolate) const {
+  Tagged<Object> data = GetData();
   if (IsCode(data)) {
     Tagged<Code> baseline_code = Code::cast(data);
-    data = baseline_code->bytecode_or_interpreter_data(cage_base);
+    data = baseline_code->bytecode_or_interpreter_data(isolate);
   }
   if (IsBytecodeArray(data)) {
     return BytecodeArray::cast(data);
   } else {
     DCHECK(IsInterpreterData(data));
-    return InterpreterData::cast(data)->bytecode_array();
+    return InterpreterData::cast(data)->bytecode_array(isolate);
   }
 }
 
@@ -643,19 +718,24 @@ void SharedFunctionInfo::SetActiveBytecodeArray(
   // functions. They should have been flushed earlier.
   DCHECK(!HasBaselineCode());
 
-  Tagged<Object> data = function_data(kAcquireLoad);
-  if (IsBytecodeArray(data)) {
-    set_function_data(bytecode, kReleaseStore);
-  } else {
-    DCHECK(IsInterpreterData(data));
+  if (HasInterpreterData()) {
     interpreter_data()->set_bytecode_array(bytecode);
+  } else {
+    DCHECK(HasBytecodeArray());
+    overwrite_bytecode_array(bytecode);
   }
 }
 
 void SharedFunctionInfo::set_bytecode_array(Tagged<BytecodeArray> bytecode) {
   DCHECK(function_data(kAcquireLoad) == Smi::FromEnum(Builtin::kCompileLazy) ||
          HasUncompiledData());
-  set_function_data(bytecode, kReleaseStore);
+  SetData(bytecode, kReleaseStore, DataType::kTrusted);
+}
+
+void SharedFunctionInfo::overwrite_bytecode_array(
+    Tagged<BytecodeArray> bytecode) {
+  DCHECK(HasBytecodeArray());
+  SetData(bytecode, kReleaseStore, DataType::kTrusted);
 }
 
 DEF_GETTER(SharedFunctionInfo, InterpreterTrampoline, Tagged<Code>) {
@@ -668,7 +748,8 @@ DEF_GETTER(SharedFunctionInfo, HasInterpreterData, bool) {
   if (IsCode(data, cage_base)) {
     Tagged<Code> baseline_code = Code::cast(data);
     DCHECK_EQ(baseline_code->kind(), CodeKind::BASELINE);
-    data = baseline_code->bytecode_or_interpreter_data(cage_base);
+    data = baseline_code->bytecode_or_interpreter_data(
+        GetIsolateForSandbox(*this));
   }
   return IsInterpreterData(data, cage_base);
 }
@@ -679,7 +760,8 @@ DEF_GETTER(SharedFunctionInfo, interpreter_data, Tagged<InterpreterData>) {
   if (IsCode(data, cage_base)) {
     Tagged<Code> baseline_code = Code::cast(data);
     DCHECK_EQ(baseline_code->kind(), CodeKind::BASELINE);
-    data = baseline_code->bytecode_or_interpreter_data(cage_base);
+    data = baseline_code->bytecode_or_interpreter_data(
+        GetIsolateForSandbox(*this));
   }
   return InterpreterData::cast(data);
 }
@@ -688,7 +770,7 @@ void SharedFunctionInfo::set_interpreter_data(
     Tagged<InterpreterData> interpreter_data, WriteBarrierMode mode) {
   DCHECK(v8_flags.interpreted_frames_native_stack);
   DCHECK(!HasBaselineCode());
-  set_function_data(interpreter_data, kReleaseStore, mode);
+  SetData(interpreter_data, kReleaseStore, DataType::kRegular, mode);
 }
 
 DEF_GETTER(SharedFunctionInfo, HasBaselineCode, bool) {
@@ -709,13 +791,13 @@ void SharedFunctionInfo::set_baseline_code(Tagged<Code> baseline_code,
                                            ReleaseStoreTag tag,
                                            WriteBarrierMode mode) {
   DCHECK_EQ(baseline_code->kind(), CodeKind::BASELINE);
-  set_function_data(baseline_code, tag, mode);
+  SetData(baseline_code, tag, DataType::kRegular, mode);
 }
 
-void SharedFunctionInfo::FlushBaselineCode() {
+void SharedFunctionInfo::FlushBaselineCode(const Isolate* isolate) {
   DCHECK(HasBaselineCode());
-  set_function_data(baseline_code(kAcquireLoad)->bytecode_or_interpreter_data(),
-                    kReleaseStore);
+  SetData(baseline_code(kAcquireLoad)->bytecode_or_interpreter_data(isolate),
+          kReleaseStore, DataType::kTrusted);
 }
 
 #if V8_ENABLE_WEBASSEMBLY
@@ -752,28 +834,31 @@ void SharedFunctionInfo::set_asm_wasm_data(Tagged<AsmWasmData> data,
                                            WriteBarrierMode mode) {
   DCHECK(function_data(kAcquireLoad) == Smi::FromEnum(Builtin::kCompileLazy) ||
          HasUncompiledData() || HasAsmWasmData());
-  set_function_data(data, kReleaseStore, mode);
+  SetData(data, kReleaseStore, DataType::kRegular, mode);
 }
 
 const wasm::WasmModule* SharedFunctionInfo::wasm_module() const {
   if (!HasWasmExportedFunctionData()) return nullptr;
-  const WasmExportedFunctionData& function_data = wasm_exported_function_data();
-  const WasmInstanceObject& wasm_instance = function_data->instance();
-  const WasmModuleObject& wasm_module_object = wasm_instance->module_object();
+  Tagged<WasmExportedFunctionData> function_data =
+      wasm_exported_function_data();
+  Tagged<WasmInstanceObject> wasm_instance = function_data->instance();
+  Tagged<WasmModuleObject> wasm_module_object = wasm_instance->module_object();
   return wasm_module_object->module();
 }
 
 const wasm::FunctionSig* SharedFunctionInfo::wasm_function_signature() const {
   const wasm::WasmModule* module = wasm_module();
   if (!module) return nullptr;
-  const WasmExportedFunctionData& function_data = wasm_exported_function_data();
+  Tagged<WasmExportedFunctionData> function_data =
+      wasm_exported_function_data();
   DCHECK_LT(function_data->function_index(), module->functions.size());
   return module->functions[function_data->function_index()].sig;
 }
 
 int SharedFunctionInfo::wasm_function_index() const {
   if (!HasWasmExportedFunctionData()) return -1;
-  const WasmExportedFunctionData& function_data = wasm_exported_function_data();
+  Tagged<WasmExportedFunctionData> function_data =
+      wasm_exported_function_data();
   DCHECK_GE(function_data->function_index(), 0);
   DCHECK_LT(function_data->function_index(), wasm_module()->functions.size());
   return function_data->function_index();
@@ -809,9 +894,7 @@ DEF_GETTER(SharedFunctionInfo, wasm_resume_data, Tagged<WasmResumeData>) {
 
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-bool SharedFunctionInfo::HasBuiltinId() const {
-  return IsSmi(function_data(kAcquireLoad));
-}
+bool SharedFunctionInfo::HasBuiltinId() const { return IsSmi(GetData()); }
 
 Builtin SharedFunctionInfo::builtin_id() const {
   DCHECK(HasBuiltinId());
@@ -822,8 +905,8 @@ Builtin SharedFunctionInfo::builtin_id() const {
 
 void SharedFunctionInfo::set_builtin_id(Builtin builtin) {
   DCHECK(Builtins::IsBuiltinId(builtin));
-  set_function_data(Smi::FromInt(static_cast<int>(builtin)), kReleaseStore,
-                    SKIP_WRITE_BARRIER);
+  SetData(Smi::FromInt(static_cast<int>(builtin)), kReleaseStore,
+          DataType::kRegular, SKIP_WRITE_BARRIER);
 }
 
 bool SharedFunctionInfo::HasUncompiledData() const {
@@ -838,9 +921,9 @@ DEF_GETTER(SharedFunctionInfo, uncompiled_data, Tagged<UncompiledData>) {
 void SharedFunctionInfo::set_uncompiled_data(
     Tagged<UncompiledData> uncompiled_data, WriteBarrierMode mode) {
   DCHECK(function_data(kAcquireLoad) == Smi::FromEnum(Builtin::kCompileLazy) ||
-         HasUncompiledData());
+         HasUncompiledData() || HasBytecodeArray() || HasBaselineCode());
   DCHECK(IsUncompiledData(uncompiled_data));
-  set_function_data(uncompiled_data, kReleaseStore);
+  SetData(uncompiled_data, kReleaseStore);
 }
 
 bool SharedFunctionInfo::HasUncompiledDataWithPreparseData() const {
@@ -858,7 +941,7 @@ void SharedFunctionInfo::set_uncompiled_data_with_preparse_data(
     WriteBarrierMode mode) {
   DCHECK(function_data(kAcquireLoad) == Smi::FromEnum(Builtin::kCompileLazy));
   DCHECK(IsUncompiledDataWithPreparseData(uncompiled_data_with_preparse_data));
-  set_function_data(uncompiled_data_with_preparse_data, kReleaseStore);
+  SetData(uncompiled_data_with_preparse_data, kReleaseStore);
 }
 
 bool SharedFunctionInfo::HasUncompiledDataWithoutPreparseData() const {
@@ -888,7 +971,8 @@ void SharedFunctionInfo::ClearPreparseData() {
 
   // We are basically trimming that object to its supertype, so recorded slots
   // within the object don't need to be invalidated.
-  heap->NotifyObjectLayoutChange(data, no_gc, InvalidateRecordedSlots::kNo);
+  heap->NotifyObjectLayoutChange(data, no_gc, InvalidateRecordedSlots::kNo,
+                                 InvalidateExternalPointerSlots::kNo);
   static_assert(UncompiledDataWithoutPreparseData::kSize <
                 UncompiledDataWithPreparseData::kSize);
   static_assert(UncompiledDataWithoutPreparseData::kSize ==

@@ -751,7 +751,7 @@ Handle<WasmValueObject> WasmValueObject::New(Isolate* isolate,
                                              Handle<Object> value) {
   auto maps = GetOrCreateDebugMaps(isolate);
   if (maps->is_the_hole(isolate, kWasmValueMapIndex)) {
-    Handle<Map> map = isolate->factory()->NewMap(
+    Handle<Map> map = isolate->factory()->NewContextfulMapForCurrentContext(
         WASM_VALUE_OBJECT_TYPE, WasmValueObject::kSize,
         TERMINAL_FAST_ELEMENTS_KIND, 2);
     Map::EnsureDescriptorSlack(isolate, map, 2);
@@ -920,7 +920,11 @@ Handle<WasmValueObject> WasmValueObject::New(
     case wasm::kRefNull:
     case wasm::kRef: {
       Handle<Object> ref = value.to_ref();
-      if (IsWasmStruct(*ref)) {
+      if (value.type().heap_type().representation() == wasm::HeapType::kExn) {
+        t = isolate->factory()->InternalizeString(
+            base::StaticCharVector("exnref"));
+        v = ref;
+      } else if (IsWasmStruct(*ref)) {
         Tagged<WasmTypeInfo> type_info =
             HeapObject::cast(*ref)->map()->wasm_type_info();
         wasm::ValueType type = wasm::ValueType::FromIndex(

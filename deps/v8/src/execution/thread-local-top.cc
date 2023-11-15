@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 #include "src/execution/thread-local-top.h"
+
+#include "src/base/sanitizer/msan.h"
 #include "src/execution/isolate.h"
 #include "src/execution/simulator.h"
-#include "src/base/sanitizer/msan.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/trap-handler/trap-handler.h"
@@ -25,7 +26,7 @@ void ThreadLocalTop::Clear() {
   pending_handler_sp_ = kNullAddress;
   num_frames_above_pending_handler_ = 0;
   last_api_entry_ = kNullAddress;
-  pending_message_ = Object();
+  pending_message_ = Tagged<Object>();
   rethrowing_message_ = false;
   external_caught_exception_ = false;
   c_entry_fp_ = kNullAddress;

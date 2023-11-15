@@ -161,8 +161,7 @@ class Deserializer : public SerializerDeserializer {
                        Handle<HeapObject> heap_object,
                        ReferenceDescriptor descr);
 
-  inline int WriteExternalPointer(ExternalPointerSlot dest, Address value,
-                                  ExternalPointerTag tag);
+  inline int WriteExternalPointer(ExternalPointerSlot dest, Address value);
   inline int WriteIndirectPointer(IndirectPointerSlot dest,
                                   Tagged<HeapObject> value);
 
@@ -220,6 +219,9 @@ class Deserializer : public SerializerDeserializer {
   template <typename SlotAccessor>
   int ReadIndirectPointerPrefix(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
+  int ReadInitializeSelfIndirectPointer(uint8_t data,
+                                        SlotAccessor slot_accessor);
+  template <typename SlotAccessor>
   int ReadRootArrayConstants(uint8_t data, SlotAccessor slot_accessor);
   template <typename SlotAccessor>
   int ReadHotObject(uint8_t data, SlotAccessor slot_accessor);
@@ -234,8 +236,8 @@ class Deserializer : public SerializerDeserializer {
   // A helper function for reading external pointer tags.
   ExternalPointerTag ReadExternalPointerTag();
 
-  Handle<HeapObject> ReadObject(SnapshotSpace space_number);
-  Handle<HeapObject> ReadMetaMap();
+  Handle<HeapObject> ReadObject(SnapshotSpace space);
+  Handle<HeapObject> ReadMetaMap(SnapshotSpace space);
 
   ReferenceDescriptor GetAndResetNextReferenceDescriptor();
 

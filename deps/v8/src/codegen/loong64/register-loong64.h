@@ -229,8 +229,9 @@ constexpr Register kJavaScriptCallExtraArg1Register = a2;
 constexpr Register kRuntimeCallFunctionRegister = a1;
 constexpr Register kRuntimeCallArgCountRegister = a0;
 constexpr Register kRuntimeCallArgvRegister = a2;
-constexpr Register kWasmInstanceRegister = a0;
+constexpr Register kWasmInstanceRegister = a7;
 constexpr Register kWasmCompileLazyFuncIndexRegister = t0;
+constexpr Register kWasmTrapHandlerFaultAddressRegister = t6;
 
 #ifdef V8_COMPRESS_POINTERS
 constexpr Register kPtrComprCageBaseRegister = s8;

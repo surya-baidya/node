@@ -9,6 +9,7 @@
 #include "src/codegen/compiler.h"
 #include "src/common/globals.h"
 #include "src/diagnostics/code-tracer.h"
+#include "src/execution/frames-inl.h"
 #include "src/execution/isolate.h"
 #include "src/execution/tiering-manager.h"
 #include "src/heap/heap-inl.h"
@@ -642,6 +643,7 @@ void JSFunction::InitializeFeedbackCell(
     EnsureClosureFeedbackCellArray(function,
                                    reset_budget_for_feedback_allocation);
   }
+#ifdef V8_ENABLE_SPARKPLUG
   // TODO(jgruber): Unduplicate these conditions from tiering-manager.cc.
   if (function->shared()->sparkplug_compiled() &&
       CanCompileWithBaseline(isolate, function->shared()) &&
@@ -655,6 +657,7 @@ void JSFunction::InitializeFeedbackCell(
                                 &is_compiled_scope);
     }
   }
+#endif  // V8_ENABLE_SPARKPLUG
 }
 
 namespace {
@@ -805,9 +808,10 @@ void JSFunction::EnsureHasInitialMap(Handle<JSFunction> function) {
   CalculateInstanceSizeHelper(instance_type, false, 0, expected_nof_properties,
                               &instance_size, &inobject_properties);
 
-  Handle<Map> map = isolate->factory()->NewMap(instance_type, instance_size,
-                                               TERMINAL_FAST_ELEMENTS_KIND,
-                                               inobject_properties);
+  Handle<NativeContext> creation_context(function->native_context(), isolate);
+  Handle<Map> map = isolate->factory()->NewContextfulMap(
+      creation_context, instance_type, instance_size,
+      TERMINAL_FAST_ELEMENTS_KIND, inobject_properties);
 
   // Fetch or allocate prototype.
   Handle<HeapObject> prototype;
@@ -1070,17 +1074,16 @@ MaybeHandle<Map> JSFunction::GetDerivedMap(Isolate* isolate,
   // constructor that points to the .prototype. This relies on
   // constructor.prototype being FROZEN for those constructors.
   if (!IsJSReceiver(*prototype)) {
-    Handle<Context> context;
-    ASSIGN_RETURN_ON_EXCEPTION(isolate, context,
+    Handle<NativeContext> native_context;
+    ASSIGN_RETURN_ON_EXCEPTION(isolate, native_context,
                                JSReceiver::GetFunctionRealm(new_target), Map);
-    DCHECK(IsNativeContext(*context));
     Handle<Object> maybe_index = JSReceiver::GetDataProperty(
         isolate, constructor,
         isolate->factory()->native_context_index_symbol());
     int index = IsSmi(*maybe_index) ? Smi::ToInt(*maybe_index)
                                     : Context::OBJECT_FUNCTION_INDEX;
-    Handle<JSFunction> realm_constructor(JSFunction::cast(context->get(index)),
-                                         isolate);
+    Handle<JSFunction> realm_constructor(
+        JSFunction::cast(native_context->get(index)), isolate);
     prototype = handle(realm_constructor->prototype(), isolate);
   }
 
@@ -1192,7 +1195,7 @@ void JSFunction::PrintName(FILE* out) {
 
 namespace {
 
-bool UseFastFunctionNameLookup(Isolate* isolate, Map map) {
+bool UseFastFunctionNameLookup(Isolate* isolate, Tagged<Map> map) {
   DCHECK(IsJSFunctionMap(map));
   if (map->NumberOfOwnDescriptors() <
       JSFunction::kMinDescriptorsForFastBindAndWrap) {
@@ -1288,7 +1291,7 @@ Handle<String> JSFunction::ToString(Handle<JSFunction> function) {
     Handle<Object> maybe_class_positions = JSReceiver::GetDataProperty(
         isolate, function, isolate->factory()->class_positions_symbol());
     if (IsClassPositions(*maybe_class_positions)) {
-      ClassPositions class_positions =
+      Tagged<ClassPositions> class_positions =
           ClassPositions::cast(*maybe_class_positions);
       int start_position = class_positions->start();
       int end_position = class_positions->end();
@@ -1411,7 +1414,7 @@ void JSFunction::CalculateInstanceSizeHelper(InstanceType instance_type,
 void JSFunction::ClearAllTypeFeedbackInfoForTesting() {
   ResetIfCodeFlushed();
   if (has_feedback_vector()) {
-    FeedbackVector vector = feedback_vector();
+    Tagged<FeedbackVector> vector = feedback_vector();
     Isolate* isolate = GetIsolate();
     if (vector->ClearAllSlotsForTesting(isolate)) {
       IC::OnFeedbackChanged(isolate, vector, FeedbackSlot::Invalid(),
